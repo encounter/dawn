@@ -28,9 +28,11 @@
 #include "src/dawn/native/opengl/PipelineGL.h"
 
 #include <algorithm>
+#include <chrono>
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 
 #include "src/dawn/common/Range.h"
 #include "src/dawn/native/BindGroupLayoutInternal.h"
@@ -47,6 +49,26 @@
 #include "src/dawn/native/opengl/UtilsGL.h"
 
 namespace dawn::native::opengl {
+
+namespace {
+
+MaybeError WaitForProgramCompletion(const OpenGLFunctions& gl, GLuint program) {
+    if (!gl.SupportsParallelShaderCompile()) {
+        return {};
+    }
+
+    GLint completionStatus = GL_FALSE;
+    do {
+        DAWN_GL_TRY(gl, GetProgramiv(program, GL_COMPLETION_STATUS_KHR, &completionStatus));
+        if (completionStatus == GL_FALSE) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    } while (completionStatus == GL_FALSE);
+
+    return {};
+}
+
+}  // anonymous namespace
 
 PipelineGL::PipelineGL() : mProgram(0) {}
 
@@ -99,6 +121,7 @@ MaybeError PipelineGL::InitializeBase(const OpenGLFunctions& gl,
 
     // Link all the shaders together.
     DAWN_GL_TRY(gl, LinkProgram(mProgram));
+    DAWN_TRY(WaitForProgramCompletion(gl, mProgram));
 
     GLint linkStatus = GL_FALSE;
     DAWN_GL_TRY(gl, GetProgramiv(mProgram, GL_LINK_STATUS, &linkStatus));

@@ -47,6 +47,15 @@ MaybeError OpenGLFunctions::Initialize(GLGetProcProc getProc) {
 #endif
     }
 
+    if (IsGLExtensionSupported("GL_KHR_parallel_shader_compile")) {
+        MaxShaderCompilerThreadsKHR =
+            reinterpret_cast<MaxShaderCompilerThreadsKHRProc>(
+                getProc("glMaxShaderCompilerThreadsKHR"));
+        if (MaxShaderCompilerThreadsKHR != nullptr) {
+            MaxShaderCompilerThreadsKHR(0xffffffffu);
+        }
+    }
+
     return {};
 }
 
@@ -60,6 +69,10 @@ bool OpenGLFunctions::IsAtLeastGL(uint32_t majorVersion, uint32_t minorVersion) 
 
 bool OpenGLFunctions::IsAtLeastGLES(uint32_t majorVersion, uint32_t minorVersion) const {
     return mVersion.IsES() && mVersion.IsAtLeast(majorVersion, minorVersion);
+}
+
+bool OpenGLFunctions::SupportsParallelShaderCompile() const {
+    return MaxShaderCompilerThreadsKHR != nullptr;
 }
 
 }  // namespace dawn::native::opengl

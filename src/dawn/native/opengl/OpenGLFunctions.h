@@ -33,7 +33,17 @@
 #include "dawn/native/opengl/OpenGLFunctionsBase_autogen.h"
 #include "src/dawn/native/opengl/OpenGLVersion.h"
 
+#ifndef GL_MAX_SHADER_COMPILER_THREADS_KHR
+#define GL_MAX_SHADER_COMPILER_THREADS_KHR 0x91B0
+#endif
+
+#ifndef GL_COMPLETION_STATUS_KHR
+#define GL_COMPLETION_STATUS_KHR 0x91B1
+#endif
+
 namespace dawn::native::opengl {
+
+using MaxShaderCompilerThreadsKHRProc = void(KHRONOS_APIENTRY*)(GLuint count);
 
 struct OpenGLFunctions : OpenGLFunctionsBase {
   public:
@@ -42,6 +52,9 @@ struct OpenGLFunctions : OpenGLFunctionsBase {
     const OpenGLVersion& GetVersion() const;
     bool IsAtLeastGL(uint32_t majorVersion, uint32_t minorVersion) const;
     bool IsAtLeastGLES(uint32_t majorVersion, uint32_t minorVersion) const;
+    bool SupportsParallelShaderCompile() const;
+
+    MaxShaderCompilerThreadsKHRProc MaxShaderCompilerThreadsKHR = nullptr;
 
   private:
     OpenGLVersion mVersion;

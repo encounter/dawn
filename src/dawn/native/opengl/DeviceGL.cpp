@@ -162,6 +162,9 @@ MaybeError Device::Initialize(const UnpackedPtr<DeviceDescriptor>& descriptor) {
     mContext->RequestRequiredExtensionsExplicitly();
 
     const OpenGLFunctions& gl = mGL;
+    if (gl.MaxShaderCompilerThreadsKHR != nullptr) {
+        gl.MaxShaderCompilerThreadsKHR(0xffffffffu);
+    }
 
     mFormatTable = BuildGLFormatTable(gl);
 
