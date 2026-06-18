@@ -58,8 +58,8 @@ void ComputePipeline::DestroyImpl(DestroyReason reason) {
 
 ResultOrError<Extent3D> ComputePipeline::InitializeImpl() {
     DAWN_TRY(ToBackend(GetDevice())
-                 ->EnqueueGL([self = Ref<ComputePipeline>(this)](
-                                 const OpenGLFunctions& gl) -> MaybeError {
+                 ->ExecutePipelineGL([self = Ref<ComputePipeline>(this)](
+                                         const OpenGLFunctions& gl) -> MaybeError {
                      Extent3D workgroupSize;
                      return self->InitializeBase(gl, ToBackend(self->GetLayout()),
                                                  self->GetAllStages(), self->mImmediateMask,

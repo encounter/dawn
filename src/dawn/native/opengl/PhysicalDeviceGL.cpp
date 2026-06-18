@@ -543,9 +543,19 @@ ResultOrError<Ref<DeviceBase>> PhysicalDevice::CreateDeviceImpl(
                                                 disableEGL15Robustness, useANGLETextureSharing,
                                                 forceES31AndMinExtensions, bindContextOnlyDuringUse,
                                                 mAngleVirtualizationGroup));
+    std::unique_ptr<ContextEGL> pipelineContext;
+    if (deviceToggles.IsEnabled(Toggle::GLAllowContextOnMultiThreads) &&
+        !deviceToggles.IsEnabled(Toggle::GLDefer)) {
+        DAWN_TRY_ASSIGN(pipelineContext,
+                        ContextEGL::Create(mDisplay, GetBackendType(), useRobustness,
+                                           disableEGL15Robustness, useANGLETextureSharing,
+                                           forceES31AndMinExtensions,
+                                           /*bindContextOnlyDuringUse=*/true,
+                                           mAngleVirtualizationGroup, context->GetRawContext()));
+    }
 
-    return Device::Create(adapter, descriptor, mFunctions, std::move(context), deviceToggles,
-                          std::move(lostEvent));
+    return Device::Create(adapter, descriptor, mFunctions, std::move(context),
+                          std::move(pipelineContext), deviceToggles, std::move(lostEvent));
 }
 
 bool PhysicalDevice::SupportsFeatureLevel(wgpu::FeatureLevel featureLevel,

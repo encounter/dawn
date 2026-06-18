@@ -89,12 +89,13 @@ ResultOrError<std::unique_ptr<ContextEGL>> ContextEGL::Create(Ref<DisplayEGL> di
                                                               bool useANGLETextureSharing,
                                                               bool forceES31AndMinExtensions,
                                                               bool bindContextOnlyDuringUse,
-                                                              EGLint angleVirtualizationGroup) {
+                                                              EGLint angleVirtualizationGroup,
+                                                              EGLContext sharedContext) {
     auto context =
         std::unique_ptr<ContextEGL>(new ContextEGL(std::move(display), bindContextOnlyDuringUse));
     DAWN_TRY(context->Initialize(backend, useRobustness, disableEGL15Robustness,
                                  useANGLETextureSharing, forceES31AndMinExtensions,
-                                 angleVirtualizationGroup));
+                                 angleVirtualizationGroup, sharedContext));
     return std::move(context);
 }
 
@@ -121,7 +122,8 @@ MaybeError ContextEGL::Initialize(wgpu::BackendType backend,
                                   bool disableEGL15Robustness,
                                   bool useANGLETextureSharing,
                                   bool forceES31AndMinExtensions,
-                                  EGLint angleVirtualizationGroup) {
+                                  EGLint angleVirtualizationGroup,
+                                  EGLContext sharedContext) {
     const EGLFunctions& egl = mDisplay->egl.get();
 
     // Unless EGL_KHR_no_config is present, we need to choose an EGLConfig on context creation that
@@ -204,7 +206,7 @@ MaybeError ContextEGL::Initialize(wgpu::BackendType backend,
     attribs.push_back(EGL_NONE);
 
     mState.context =
-        egl.CreateContext(mDisplay->GetDisplay(), contextConfig, EGL_NO_CONTEXT, attribs.data());
+        egl.CreateContext(mDisplay->GetDisplay(), contextConfig, sharedContext, attribs.data());
     DAWN_TRY(CheckEGL(egl, mState.context != EGL_NO_CONTEXT, "eglCreateContext"));
 
     // When EGL_KHR_surfaceless_context is not supported, we need to create a pbuffer to act
@@ -395,6 +397,10 @@ ResultOrError<ContextEGL::ScopedMakeCurrent> ContextEGL::MakeCurrent() {
     ScopedMakeCurrent scopedMakeCurrent(IsInScopedMakeCurrent() ? nullptr : this);
     DAWN_TRY(scopedMakeCurrent.Initialize());
     return std::move(scopedMakeCurrent);
+}
+
+EGLContext ContextEGL::GetRawContext() const {
+    return mState.context;
 }
 
 }  // namespace dawn::native::opengl

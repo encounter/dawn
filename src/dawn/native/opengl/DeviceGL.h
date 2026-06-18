@@ -62,6 +62,7 @@ class Device final : public DeviceBase {
                                              const UnpackedPtr<DeviceDescriptor>& descriptor,
                                              const OpenGLFunctions& functions,
                                              std::unique_ptr<ContextEGL> context,
+                                             std::unique_ptr<ContextEGL> pipelineContext,
                                              const TogglesState& deviceToggles,
                                              Ref<DeviceBase::DeviceLostEvent>&& lostEvent);
     ~Device() override;
@@ -86,6 +87,11 @@ class Device final : public DeviceBase {
     //    - In this case, the 2nd EnqueueGL's work will run immediately.
     template <typename Fn>
     MaybeError EnqueueGL(ExecutionQueueBase::SubmitMode submitMode, Fn&& work) {
+        if (mPipelineContext != nullptr && mPipelineContext->IsInScopedMakeCurrent()) {
+            MarkGLUsed(submitMode);
+            return work(mGL);
+        }
+
         // First special case: run immediately if defer mode is disabled.
         if (!IsToggleEnabled(Toggle::GLDefer)) {
             // We use ExecuteGL to ensure the GL context is made current.
@@ -198,6 +204,30 @@ class Device final : public DeviceBase {
         return std::move(result);
     }
 
+    template <typename Fn>
+    auto ExecutePipelineGL(Fn&& work) -> std::invoke_result_t<Fn, const OpenGLFunctions&> {
+        if (mPipelineContext == nullptr) {
+            return ExecuteGL(ExecutionQueueBase::SubmitMode::Normal, std::forward<Fn>(work));
+        }
+
+        ContextEGL::ScopedMakeCurrent scopedCurrentContext;
+        DAWN_TRY_ASSIGN(scopedCurrentContext, mPipelineContext->MakeCurrent());
+
+        if (mGL.MaxShaderCompilerThreadsKHR != nullptr) {
+            mGL.MaxShaderCompilerThreadsKHR(0xffffffffu);
+        }
+
+        MarkGLUsed(ExecutionQueueBase::SubmitMode::Normal);
+
+        auto result = work(mGL);
+        if (DAWN_UNLIKELY(result.IsError())) {
+            return std::move(result);
+        }
+
+        DAWN_TRY(scopedCurrentContext.End());
+        return std::move(result);
+    }
+
     // TODO(451928481): remove this from public access once all places are updated to use
     // EnqueueGL().
     // Returns all the OpenGL entry points and ensures that the associated GL context is current.
@@ -253,6 +283,7 @@ class Device final : public DeviceBase {
            const UnpackedPtr<DeviceDescriptor>& descriptor,
            const OpenGLFunctions& functions,
            std::unique_ptr<ContextEGL> context,
+           std::unique_ptr<ContextEGL> pipelineContext,
            const TogglesState& deviceToggles,
            Ref<DeviceBase::DeviceLostEvent>&& lostEvent);
 
@@ -306,6 +337,7 @@ class Device final : public DeviceBase {
 
     GLFormatTable mFormatTable;
     std::unique_ptr<ContextEGL> mContext;
+    std::unique_ptr<ContextEGL> mPipelineContext;
     int mMaxTextureMaxAnisotropy = 0;
 
     // Maintain an internal uniform buffer to store extra information needed by shader emulation for

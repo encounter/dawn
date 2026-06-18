@@ -351,7 +351,7 @@ ShaderModule::ShaderModule(Device* device,
                            std::vector<tint::wgsl::Extension> internalExtensions)
     : ShaderModuleBase(device, descriptor, std::move(internalExtensions)) {}
 
-ResultOrError<GLuint> ShaderModule::CompileShader(
+ResultOrError<TranslatedShader> ShaderModule::TranslateToGLSL(
     const OpenGLFunctions& gl,
     const ProgrammableStage& programmableStage,
     SingleShaderStage stage,
@@ -360,8 +360,7 @@ ResultOrError<GLuint> ShaderModule::CompileShader(
     std::vector<CombinedSampler>* combinedSamplersOut,
     const PipelineLayout* layout,
     EmulatedTextureBuiltinRegistrar* emulatedTextureBuiltins,
-    bool* needsSSBOLengthUniformBuffer,
-    Extent3D* workgroupSize) {
+    bool* needsSSBOLengthUniformBuffer) {
     TRACE_EVENT0(GetDevice()->GetPlatform(), General, "TranslateToGLSL");
 
     const OpenGLVersion& version = gl.GetVersion();
@@ -551,8 +550,6 @@ ResultOrError<GLuint> ShaderModule::CompileShader(
         },
         "OpenGL.CompileShaderToGLSL");
 
-    *workgroupSize = compilationResult->workgroupSize;
-
     if (GetDevice()->IsToggleEnabled(Toggle::DumpShaders)) {
         std::ostringstream dumpedMsg;
         dumpedMsg << "/* Dumped generated GLSL */\n" << compilationResult->glsl;
@@ -560,8 +557,19 @@ ResultOrError<GLuint> ShaderModule::CompileShader(
         GetDevice()->EmitLog(wgpu::LoggingType::Info, dumpedMsg.str().c_str());
     }
 
+    GetDevice()->GetBlobCache()->EnsureStored(compilationResult);
+
+    return TranslatedShader{
+        .glsl = compilationResult->glsl,
+        .workgroupSize = compilationResult->workgroupSize,
+    };
+}
+
+ResultOrError<GLuint> ShaderModule::CompileShader(const OpenGLFunctions& gl,
+                                                  SingleShaderStage stage,
+                                                  const std::string& glsl) {
     GLuint shader = DAWN_GL_TRY(gl, CreateShader(GLShaderType(stage)));
-    const char* source = compilationResult->glsl.c_str();
+    const char* source = glsl.c_str();
     {
         SCOPED_DAWN_HISTOGRAM_TIMER_MICROS(GetDevice()->GetPlatform(), "GLSL.CompileShader");
 
@@ -572,21 +580,21 @@ ResultOrError<GLuint> ShaderModule::CompileShader(
     if (!gl.SupportsParallelShaderCompile()) {
         GLint compileStatus = GL_FALSE;
         DAWN_GL_TRY(gl, GetShaderiv(shader, GL_COMPILE_STATUS, &compileStatus));
-        if (compileStatus == GL_FALSE) {
-            GLint infoLogLength = 0;
-            DAWN_GL_TRY(gl, GetShaderiv(shader, GL_INFO_LOG_LENGTH, &infoLogLength));
+        if (compileStatus != GL_FALSE) {
+            return shader;
+        }
 
-            if (infoLogLength > 1) {
-                std::vector<char> buffer(infoLogLength);
-                DAWN_GL_TRY(gl, GetShaderInfoLog(shader, infoLogLength, nullptr, &buffer[0]));
-                DAWN_GL_TRY(gl, DeleteShader(shader));
-                return DAWN_VALIDATION_ERROR("%s\nProgram compilation failed:\n%s", source,
-                                             buffer.data());
-            }
+        GLint infoLogLength = 0;
+        DAWN_GL_TRY(gl, GetShaderiv(shader, GL_INFO_LOG_LENGTH, &infoLogLength));
+
+        if (infoLogLength > 1) {
+            std::vector<char> buffer(infoLogLength);
+            DAWN_GL_TRY(gl, GetShaderInfoLog(shader, infoLogLength, nullptr, &buffer[0]));
+            DAWN_GL_TRY(gl, DeleteShader(shader));
+            return DAWN_VALIDATION_ERROR("%s\nProgram compilation failed:\n%s", source,
+                                         buffer.data());
         }
     }
-
-    GetDevice()->GetBlobCache()->EnsureStored(compilationResult);
 
     return shader;
 }

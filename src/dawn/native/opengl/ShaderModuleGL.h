@@ -53,6 +53,11 @@ class EmulatedTextureBuiltinRegistrar;
 class PipelineLayout;
 struct OpenGLFunctions;
 
+struct TranslatedShader {
+    std::string glsl;
+    Extent3D workgroupSize;
+};
+
 #define COMBINED_SAMPLER_ELEMENT_MEMBERS(X)                                                 \
     X(BindGroupIndex, group)                                                                \
     X(BindingIndex, index)                                                                  \
@@ -84,16 +89,19 @@ class ShaderModule final : public ShaderModuleBase {
         const UnpackedPtr<ShaderModuleDescriptor>& descriptor,
         const std::vector<tint::wgsl::Extension>& internalExtensions);
 
+    ResultOrError<TranslatedShader> TranslateToGLSL(
+        const OpenGLFunctions& gl,
+        const ProgrammableStage& programmableStage,
+        SingleShaderStage stage,
+        const ImmediateMask& pipelineImmediateMask,
+        VertexAttributeMask bgraSwizzleAttributes,
+        std::vector<CombinedSampler>* combinedSamplers,
+        const PipelineLayout* layout,
+        EmulatedTextureBuiltinRegistrar* emulatedTextureBuiltings,
+        bool* needsSSBOLengthUniformBuffer);
     ResultOrError<GLuint> CompileShader(const OpenGLFunctions& gl,
-                                        const ProgrammableStage& programmableStage,
                                         SingleShaderStage stage,
-                                        const ImmediateMask& pipelineImmediateMask,
-                                        VertexAttributeMask bgraSwizzleAttributes,
-                                        std::vector<CombinedSampler>* combinedSamplers,
-                                        const PipelineLayout* layout,
-                                        EmulatedTextureBuiltinRegistrar* emulatedTextureBuiltings,
-                                        bool* needsSSBOLengthUniformBuffer,
-                                        Extent3D* workgroupSize);
+                                        const std::string& glsl);
 
   private:
     ShaderModule(Device* device,

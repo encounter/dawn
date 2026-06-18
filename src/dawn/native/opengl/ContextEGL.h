@@ -53,7 +53,8 @@ class ContextEGL : NonMovable {
                                                              bool useANGLETextureSharing,
                                                              bool forceES31AndMinExtensions,
                                                              bool bindContextOnlyDuringUse,
-                                                             EGLint angleVirtualizationGroup);
+                                                             EGLint angleVirtualizationGroup,
+                                                             EGLContext sharedContext = EGL_NO_CONTEXT);
 
     ~ContextEGL();
 
@@ -107,6 +108,7 @@ class ContextEGL : NonMovable {
     };
 
     ResultOrError<ScopedMakeCurrent> MakeCurrent();
+    EGLContext GetRawContext() const;
 
   private:
     explicit ContextEGL(Ref<DisplayEGL> display, bool bindContextOnlyDuringUse);
@@ -116,7 +118,8 @@ class ContextEGL : NonMovable {
                           bool useANGLETextureSharing,
                           bool disableEGL15Robustness,
                           bool forceES31AndMinExtensions,
-                          EGLint angleVirtualizationGroup);
+                          EGLint angleVirtualizationGroup,
+                          EGLContext sharedContext);
 
     bool IsNotCurrentOnAnotherThread() const;
 

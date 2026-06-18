@@ -36,8 +36,11 @@
 
 #include "src/dawn/common/Range.h"
 #include "src/dawn/native/BindGroupLayoutInternal.h"
+#include "src/dawn/native/Blob.h"
+#include "src/dawn/native/CacheKey.h"
 #include "src/dawn/native/Device.h"
 #include "src/dawn/native/Pipeline.h"
+#include "src/dawn/native/Serializable.h"
 #include "src/dawn/native/opengl/BufferGL.h"
 #include "src/dawn/native/opengl/DeviceGL.h"
 #include "src/dawn/native/opengl/Forward.h"
@@ -51,6 +54,25 @@
 namespace dawn::native::opengl {
 
 namespace {
+
+#define GL_PROGRAM_BINARY_MEMBERS(X) \
+    X(GLenum, binaryFormat)          \
+    X(std::vector<uint8_t>, binary)
+DAWN_SERIALIZABLE(struct, GLProgramBinary, GL_PROGRAM_BINARY_MEMBERS) {
+    static ResultOrError<GLProgramBinary> FromValidatedBlob(Blob blob) {
+        GLProgramBinary result;
+        DAWN_TRY_ASSIGN(result, GLProgramBinary::FromBlob(std::move(blob)));
+        DAWN_INVALID_IF(result.binaryFormat == 0, "Cached OpenGL program binary has no format");
+        DAWN_INVALID_IF(result.binary.empty(), "Cached OpenGL program binary is empty");
+        return result;
+    }
+};
+#undef GL_PROGRAM_BINARY_MEMBERS
+
+struct TranslatedPipelineShader {
+    SingleShaderStage stage;
+    std::string glsl;
+};
 
 MaybeError WaitForProgramCompletion(const OpenGLFunctions& gl, GLuint program) {
     if (!gl.SupportsParallelShaderCompile()) {
@@ -68,6 +90,79 @@ MaybeError WaitForProgramCompletion(const OpenGLFunctions& gl, GLuint program) {
     return {};
 }
 
+ResultOrError<bool> SupportsProgramBinaries(const OpenGLFunctions& gl) {
+    if (gl.ProgramBinary == nullptr || gl.GetProgramBinary == nullptr ||
+        gl.ProgramParameteri == nullptr) {
+        return false;
+    }
+
+    GLint binaryFormatCount = 0;
+    DAWN_GL_TRY(gl, GetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &binaryFormatCount));
+    return binaryFormatCount > 0;
+}
+
+CacheKey CreateProgramBinaryCacheKey(DeviceBase* device,
+                                     const wgpu::ShaderStage activeStages,
+                                     const std::vector<TranslatedPipelineShader>& shaders) {
+    CacheKey key = device->GetCacheKey();
+    StreamIn(&key, std::string("OpenGL.ProgramBinary.v1"), activeStages);
+    for (const TranslatedPipelineShader& shader : shaders) {
+        StreamIn(&key, shader.stage, shader.glsl);
+    }
+    return key;
+}
+
+ResultOrError<bool> LoadProgramBinary(const OpenGLFunctions& gl,
+                                      DeviceBase* device,
+                                      const CacheKey& cacheKey,
+                                      GLuint program) {
+    Blob blob = device->LoadCachedBlob(cacheKey);
+    if (blob.Empty()) {
+        return false;
+    }
+
+    auto binaryResult = GLProgramBinary::FromValidatedBlob(std::move(blob));
+    if (binaryResult.IsError()) {
+        binaryResult.AcquireError();
+        return false;
+    }
+
+    GLProgramBinary binary = binaryResult.AcquireSuccess();
+    gl.ProgramBinary(program, binary.binaryFormat, binary.binary.data(),
+                     dchecked_cast<GLsizei>(binary.binary.size()));
+    if (gl.GetError() != GL_NO_ERROR) {
+        return false;
+    }
+
+    GLint linkStatus = GL_FALSE;
+    DAWN_GL_TRY(gl, GetProgramiv(program, GL_LINK_STATUS, &linkStatus));
+    return linkStatus != GL_FALSE;
+}
+
+MaybeError StoreProgramBinary(const OpenGLFunctions& gl,
+                              DeviceBase* device,
+                              const CacheKey& cacheKey,
+                              GLuint program) {
+    GLint binaryLength = 0;
+    DAWN_GL_TRY(gl, GetProgramiv(program, GL_PROGRAM_BINARY_LENGTH, &binaryLength));
+    if (binaryLength <= 0) {
+        return {};
+    }
+
+    GLProgramBinary binary;
+    binary.binary.resize(binaryLength);
+    GLsizei bytesWritten = 0;
+    gl.GetProgramBinary(program, binaryLength, &bytesWritten, &binary.binaryFormat,
+                        binary.binary.data());
+    if (gl.GetError() != GL_NO_ERROR || bytesWritten <= 0) {
+        return {};
+    }
+
+    binary.binary.resize(bytesWritten);
+    device->StoreCachedBlob(cacheKey, binary.ToBlob());
+    return {};
+}
+
 }  // anonymous namespace
 
 PipelineGL::PipelineGL() : mProgram(0) {}
@@ -80,8 +175,6 @@ MaybeError PipelineGL::InitializeBase(const OpenGLFunctions& gl,
                                       ImmediateMask& pipelineImmediateMask,
                                       VertexAttributeMask bgraSwizzleAttributes,
                                       Extent3D* workgroupSize) {
-    mProgram = DAWN_GL_TRY(gl, CreateProgram());
-
     // Compute the set of active stages.
     wgpu::ShaderStage activeStages = wgpu::ShaderStage::None;
     for (SingleShaderStage stage : IterateStages(kAllStages)) {
@@ -93,35 +186,71 @@ MaybeError PipelineGL::InitializeBase(const OpenGLFunctions& gl,
     // Create an OpenGL shader for each stage and gather the list of combined samplers.
     std::set<CombinedSampler> combinedSamplers;
     mNeedsSSBOLengthUniformBuffer = false;
-    std::vector<GLuint> glShaders;
+    std::vector<TranslatedPipelineShader> translatedShaders;
     EmulatedTextureBuiltinRegistrar emulatedTextureBuiltins(layout);
     for (SingleShaderStage stage : IterateStages(activeStages)) {
         ShaderModule* module = ToBackend(stages[stage].module.Get());
         bool needsSSBOLengthUniformBuffer = false;
         std::vector<CombinedSampler> stageCombinedSamplers;
-        Extent3D localWorkgroupSize;
-        GLuint shader;
+        TranslatedShader translatedShader;
         DAWN_TRY_ASSIGN(
-            shader, module->CompileShader(gl, stages[stage], stage, pipelineImmediateMask,
-                                          bgraSwizzleAttributes, &stageCombinedSamplers, layout,
-                                          &emulatedTextureBuiltins, &needsSSBOLengthUniformBuffer,
-                                          &localWorkgroupSize));
+            translatedShader,
+            module->TranslateToGLSL(gl, stages[stage], stage, pipelineImmediateMask,
+                                    bgraSwizzleAttributes, &stageCombinedSamplers, layout,
+                                    &emulatedTextureBuiltins, &needsSSBOLengthUniformBuffer));
         if (stage == SingleShaderStage::Compute) {
-            *workgroupSize = localWorkgroupSize;
+            *workgroupSize = translatedShader.workgroupSize;
         }
 
         mNeedsSSBOLengthUniformBuffer |= needsSSBOLengthUniformBuffer;
         combinedSamplers.insert(stageCombinedSamplers.begin(), stageCombinedSamplers.end());
 
-        DAWN_GL_TRY(gl, AttachShader(mProgram, shader));
-        glShaders.push_back(shader);
+        translatedShaders.push_back(
+            {.stage = stage, .glsl = std::move(translatedShader.glsl)});
     }
 
     mEmulatedTextureBuiltinInfo = emulatedTextureBuiltins.AcquireInfo();
 
-    // Link all the shaders together.
-    DAWN_GL_TRY(gl, LinkProgram(mProgram));
-    DAWN_TRY(WaitForProgramCompletion(gl, mProgram));
+    DeviceBase* device = layout->GetDevice();
+    CacheKey programBinaryCacheKey =
+        CreateProgramBinaryCacheKey(device, activeStages, translatedShaders);
+
+    bool canUseProgramBinaries = false;
+    DAWN_TRY_ASSIGN(canUseProgramBinaries, SupportsProgramBinaries(gl));
+
+    mProgram = DAWN_GL_TRY(gl, CreateProgram());
+    bool loadedProgramBinary = false;
+    if (canUseProgramBinaries) {
+        DAWN_TRY_ASSIGN(loadedProgramBinary,
+                        LoadProgramBinary(gl, device, programBinaryCacheKey, mProgram));
+    }
+
+    std::vector<GLuint> glShaders;
+    if (!loadedProgramBinary) {
+        DAWN_GL_TRY(gl, DeleteProgram(mProgram));
+        mProgram = DAWN_GL_TRY(gl, CreateProgram());
+
+        if (canUseProgramBinaries) {
+            gl.ProgramParameteri(mProgram, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
+            if (gl.GetError() != GL_NO_ERROR) {
+                canUseProgramBinaries = false;
+            }
+        }
+
+        for (const TranslatedPipelineShader& translatedShader : translatedShaders) {
+            ShaderModule* module = ToBackend(stages[translatedShader.stage].module.Get());
+            GLuint shader;
+            DAWN_TRY_ASSIGN(shader,
+                            module->CompileShader(gl, translatedShader.stage,
+                                                  translatedShader.glsl));
+            DAWN_GL_TRY(gl, AttachShader(mProgram, shader));
+            glShaders.push_back(shader);
+        }
+
+        // Link all the shaders together.
+        DAWN_GL_TRY(gl, LinkProgram(mProgram));
+        DAWN_TRY(WaitForProgramCompletion(gl, mProgram));
+    }
 
     GLint linkStatus = GL_FALSE;
     DAWN_GL_TRY(gl, GetProgramiv(mProgram, GL_LINK_STATUS, &linkStatus));
@@ -134,6 +263,10 @@ MaybeError PipelineGL::InitializeBase(const OpenGLFunctions& gl,
             DAWN_GL_TRY(gl, GetProgramInfoLog(mProgram, infoLogLength, nullptr, &buffer[0]));
             return DAWN_VALIDATION_ERROR("Program link failed:\n%s", buffer.data());
         }
+    }
+
+    if (!loadedProgramBinary && canUseProgramBinaries) {
+        DAWN_TRY(StoreProgramBinary(gl, device, programBinaryCacheKey, mProgram));
     }
 
     // Compute links between stages for combined samplers, then bind them to texture units
@@ -198,9 +331,11 @@ MaybeError PipelineGL::InitializeBase(const OpenGLFunctions& gl,
         }
     }
 
-    for (GLuint glShader : glShaders) {
-        DAWN_GL_TRY(gl, DetachShader(mProgram, glShader));
-        DAWN_GL_TRY(gl, DeleteShader(glShader));
+    if (!loadedProgramBinary) {
+        for (GLuint glShader : glShaders) {
+            DAWN_GL_TRY(gl, DetachShader(mProgram, glShader));
+            DAWN_GL_TRY(gl, DeleteShader(glShader));
+        }
     }
 
     return {};
