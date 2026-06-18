@@ -105,6 +105,9 @@ MaybeError SwapChainEGL::PresentImpl() {
     // Do the reverse-Y blit from the fake surface texture to the default framebuffer.
     {
         auto surfaceCurrent = device->GetContext()->SetCurrentSurfaceScope(mEGLSurface);
+        ContextEGL::ScopedMakeCurrent scopedCurrentContext;
+        DAWN_TRY_ASSIGN(scopedCurrentContext, device->GetContext()->MakeCurrent());
+
         EGLint surfaceWidth;
         EGLint surfaceHeight;
         DAWN_TRY(CheckEGL(egl, egl.QuerySurface(display, mEGLSurface, EGL_WIDTH, &surfaceWidth),
@@ -112,7 +115,7 @@ MaybeError SwapChainEGL::PresentImpl() {
         DAWN_TRY(CheckEGL(egl, egl.QuerySurface(display, mEGLSurface, EGL_HEIGHT, &surfaceHeight),
                           "getting surface height"));
 
-        const OpenGLFunctions& gl = device->GetGL();
+        const OpenGLFunctions& gl = device->GetGL(/*makeCurrent=*/false);
 
         GLuint readFbo = 0;
         DAWN_GL_TRY(gl, GenFramebuffers(1, &readFbo));
@@ -126,9 +129,10 @@ MaybeError SwapChainEGL::PresentImpl() {
                                         surfaceWidth, 0, GL_COLOR_BUFFER_BIT, GL_LINEAR));
 
         DAWN_GL_TRY(gl, DeleteFramebuffers(1, &readFbo));
-    }
 
-    egl.SwapBuffers(display, mEGLSurface);
+        egl.SwapBuffers(display, mEGLSurface);
+        DAWN_TRY(scopedCurrentContext.End());
+    }
 
     mTexture->APIDestroy();
     mTexture = nullptr;
