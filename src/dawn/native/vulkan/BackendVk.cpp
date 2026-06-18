@@ -454,6 +454,20 @@ ResultOrError<VulkanGlobalKnobs> VulkanInstance::CreateVkInstance(const Instance
     // Always use the Fuchsia swapchain layer if available.
     UseLayerIfAvailable(VulkanLayer::FuchsiaImagePipeSwapchain);
 
+    bool useDebugUtils = instance->IsBackendValidationEnabled();
+#if defined(DAWN_USE_RENDERDOC) || defined(DAWN_USE_VKTRACE)
+    useDebugUtils = true;
+#endif
+    if (!useDebugUtils) {
+        // VK_EXT_debug_utils is only used for debug labels/markers and validation
+        // callbacks. Avoid enabling it if unused, as some Adreno drivers advertise the
+        // extension but fail when it is requested at instance creation.
+        extensionsToRequest.reset(InstanceExt::DebugUtils);
+    }
+    if (!instance->IsBackendValidationEnabled()) {
+        extensionsToRequest.reset(InstanceExt::ValidationFeatures);
+    }
+
     // Available and known instance extensions default to being requested, but some special
     // cases are removed.
     usedKnobs.extensions = extensionsToRequest;
